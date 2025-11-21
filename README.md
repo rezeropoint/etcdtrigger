@@ -1,20 +1,21 @@
 # EtcdTrigger
 
-一个基于 Go 语言的 etcd 配置监听库，提供实时配置变更监听功能。
+一个基于 Go 语言的 etcd 配置监听与管理库，提供实时配置变更监听（Watcher）和强类型配置缓存（Store）功能。
 
 ## 功能特性
 
-- 🚀 实时监听 etcd 配置变更
-- 📋 支持前缀匹配监听
-- 🔄 自动处理初始化配置加载
-- 🔐 支持用户名密码认证
-- 🛡️ 完善的错误处理机制
-- ⚡ 基于 go-zero 框架的高性能日志
+- **双模式支持**:
+  - 🚀 **Watcher 模式**: 原始回调监听，处理字节数组数据，适合底层事件处理
+  - 💾 **Store 模式**: 强类型配置缓存，自动 JSON 序列化/反序列化，支持从内存直接读取配置
+- 📋 **前缀匹配**: 支持按目录前缀监听配置变更
+- 🔄 **自动同步**: 初始化时自动加载现有配置，后续变更实时同步
+- 🔌 **依赖注入**: 灵活集成，支持传入外部管理的 etcd 客户端
+- ⚡ **高性能**: 基于 go-zero 框架和 etcd client v3
 
 ## 安装
 
 ```bash
-go get github.com/rezeropoint/etcdtrigger
+go get github.com/rezeropoint/etcdtrigger/v2
 ```
 
 ## 快速开始
@@ -29,132 +30,117 @@ import (
     "log"
     "time"
 
-    "github.com/rezeropoint/etcdtrigger"
+    "github.com/rezeropoint/etcdtrigger/v2/core"
+    "github.com/rezeropoint/etcdtrigger/v2/engine"
+    clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+// 定义配置结构体
+type DatabaseConfig struct {
+    Host string `json:"host"`
+    Port int    `json:"port"`
+}
+
 func main() {
-    // 创建配置
-    config := &etcdtrigger.Config{
+    // 1. 创建 etcd 客户端（由调用方管理生命周期）
+    etcdClient, err := clientv3.New(clientv3.Config{
         Endpoints:   []string{"localhost:2379"},
         DialTimeout: 5 * time.Second,
-    }
-
-    // 创建上下文
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
-
-    // 创建客户端
-    client, err := etcdtrigger.NewEtcdClient(ctx, cancel, config)
+    })
     if err != nil {
-        log.Fatal("创建etcd客户端失败:", err)
+        log.Fatal(err)
     }
-    defer client.Close()
+    defer etcdClient.Close()
 
-    // 订阅配置变更
-    err = client.Subscribe("/config/", func(key string, value []byte) error {
-        if value == nil {
-            log.Printf("配置被删除: %s", key)
-        } else {
-            log.Printf("配置变更: %s = %s", key, string(value))
-        }
+    // 2. 创建引擎
+    eng := engine.NewEngine(etcdClient, &engine.Config{
+        PodName:     "my-pod",
+        ServiceName: "my-service",
+        // 预加载配置：自动监听并缓存到内存（Store 功能）
+        Configs: []core.WatchConfig{
+            {Path: "/app/config/db", Struct: &DatabaseConfig{}},
+        },
+    })
+
+    // 3. 使用 Watcher 功能（原始操作）
+    eng.Watch("/app/events/", func(event *core.WatchEvent) error {
+        log.Printf("收到事件: Type=%s, Key=%s, Value=%s", event.EventType, event.Key, string(event.Value))
         return nil
     })
 
-    if err != nil {
-        log.Fatal("订阅失败:", err)
+    // 4. 使用 Store 功能（强类型读写）
+    // 写入配置
+    dbConfig := &DatabaseConfig{Host: "localhost", Port: 3306}
+    eng.PutConfig(context.Background(), "/app/config/db", dbConfig)
+
+    // 等待同步...
+    time.Sleep(100 * time.Millisecond)
+
+    // 从本地缓存读取配置（不访问 etcd）
+    var cachedDB DatabaseConfig
+    if eng.GetConfig("/app/config/db", &cachedDB) {
+        log.Printf("读取配置: %+v", cachedDB)
     }
-
-    // 阻塞等待
-    select {}
 }
 ```
 
-### 带认证的用法
+## 核心概念
 
-```go
-config := &etcdtrigger.Config{
-    Endpoints:   []string{"localhost:2379"},
-    DialTimeout: 5 * time.Second,
-    Username:    "your_username",
-    Password:    "your_password",
-}
-```
+EtcdTrigger 提供了两种核心交互模式：
+
+### 1. Watcher (原始监听)
+适用于需要直接处理 etcd 原始数据的场景。
+- `Watch`: 监听变更
+- `WatchPut`: 写入原始字节
+- `WatchGet`: 获取原始字节
+- `WatchDelete`: 删除键
+
+### 2. Store (强类型缓存)
+适用于应用程序配置管理。配置数据被自动缓存到内存中，读取操作极其高效（无网络开销）。
+- `PutConfig`: 序列化并写入配置
+- `GetConfig`: 从内存缓存读取反序列化后的对象
+- `AddPrefixWatcher`: 监听前缀变更
+- `Configs` (初始化参数): 启动时自动加载并缓存的配置项
 
 ## API 文档
+
+### Engine 接口
+
+```go
+type Engine interface {
+    // Watcher 功能
+    Watch(key string, callback core.WatchCallback) error
+    WatchPut(key string, value []byte) error
+    WatchDelete(key string) error
+    WatchGet(key string) ([]byte, error)
+
+    // Store 功能
+    GetConfig(key string, result any) bool
+    PutConfig(ctx context.Context, key string, config any) error
+    DeleteConfig(ctx context.Context, key string) error
+    GetAllKeys(prefix string) []string
+    AddPrefixWatcher(prefix string, callback core.PrefixWatchCallback)
+
+    // 获取底层客户端
+    Client() *clientv3.Client
+}
+```
 
 ### Config 结构体
 
 ```go
 type Config struct {
-    Key         string        // 监听的配置键前缀
-    Endpoints   []string      // Etcd服务器端点列表
-    DialTimeout time.Duration // 连接超时时间
-    Username    string        // 用户名（可选）
-    Password    string        // 密码（可选）
+    PodName     string             // Pod 标识
+    ServiceName string             // 服务名称
+    Configs     []core.WatchConfig // 预加载配置列表
 }
 ```
-
-### EtcdClient 接口
-
-```go
-type EtcdClient interface {
-    Subscribe(key string, callback func(string, []byte) error) error
-    Put(key string, value []byte) error
-    Delete(key string) error
-    Close() error
-}
-```
-
-#### Subscribe
-
-订阅指定前缀的配置变更。会先加载所有现有配置，然后监听后续变更。
-
-**参数:**
-- `key`: 监听的键前缀
-- `callback`: 配置变更回调函数，参数为键名和值（删除时值为 nil）
-
-#### Put
-
-向 etcd 写入键值对。
-
-**参数:**
-- `key`: 键名
-- `value`: 值的字节数组
-
-#### Delete
-
-从 etcd 删除指定键。
-
-**参数:**
-- `key`: 要删除的键名
-
-#### Close
-
-关闭 etcd 客户端连接。
-
-## 错误处理
-
-库定义了详细的错误类型，便于错误处理和调试：
-
-- `ErrEtcdConnectionFailed`: 连接 etcd 失败
-- `ErrEtcdEndpointsEmpty`: etcd 端点列表为空
-- `ErrInvalidEtcdKey`: etcd 键不能为空
-- `ErrEtcdPutOperation`: 写入操作失败
-- 更多错误类型请查看 `error.go`
 
 ## 依赖
 
-- [go-zero](https://github.com/zeromicro/go-zero) - 高性能微服务框架
-- [etcd client v3](https://go.etcd.io/etcd/client/v3) - etcd 官方客户端
+- [go-zero](https://github.com/zeromicro/go-zero)
+- [etcd client v3](https://go.etcd.io/etcd/client/v3)
 
 ## 许可证
 
 MIT License - 详见 [LICENSE](LICENSE) 文件
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 支持
-
-如果有任何问题，请提交 Issue 或联系维护者。

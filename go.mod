@@ -1,8 +1,9 @@
-module github.com/rezeropoint/etcdtrigger
+module github.com/rezeropoint/etcdtrigger/v2
 
 go 1.25.1
 
 require (
+	github.com/json-iterator/go v1.1.12
 	github.com/zeromicro/go-zero v1.9.0
 	go.etcd.io/etcd/client/v3 v3.6.5
 )
@@ -16,6 +17,8 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.3 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
+	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	go.etcd.io/etcd/api/v3 v3.6.5 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.6.5 // indirect
